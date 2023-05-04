@@ -17,8 +17,9 @@
     "access": "public"
   },
   "license": "MIT",
-  "dependencies": {
-    "@asyncapi/parser": "^1.13.0",
+  "dependencies": {    
+    "@asyncapi/avro-schema-parser": "^2.0.1",
+    "@asyncapi/parser": "^2.0.0",
     "@eventcatalog/utils": "^0.2.2",
     "chalk": "^4.1.2",
     "front-matter": "^4.0.2",
@@ -36,6 +37,7 @@
     "@types/fs-extra": "^9.0.13",
     "@types/json2md": "^1.5.1",
     "@types/lodash.merge": "^4.6.7",
-    "@types/yamljs": "^0.2.31"
+    "@types/yamljs": "^0.2.31",    
+    "@types/node-fetch": "^2.6.3"
   }
 }

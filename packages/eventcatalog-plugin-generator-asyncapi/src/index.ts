@@ -1,59 +1,75 @@
-import chalk from 'chalk';
+import { Parser, stringify, AsyncAPIDocumentInterface, MessageInterface } from '@asyncapi/parser';
+import { AvroSchemaParser } from '@asyncapi/avro-schema-parser';
+// import chalk from 'chalk';
 import type { Event, Service, LoadContext, Domain } from '@eventcatalog/types';
-import { parse, AsyncAPIDocument } from '@asyncapi/parser';
 import fs from 'fs-extra';
+
 import path from 'path';
 import utils from '@eventcatalog/utils';
 import merge from 'lodash.merge';
 
 import type { AsyncAPIPluginOptions } from './types';
 
-const getServiceFromAsyncDoc = (doc: AsyncAPIDocument): Service => ({
+const parser = new Parser();
+parser.registerSchemaParser(AvroSchemaParser());
+
+const getServiceFromAsyncDoc = (doc: AsyncAPIDocumentInterface): Service => ({
   name: doc.info().title(),
   summary: doc.info().description() || '',
 });
+const getMessageName = (message: MessageInterface): string | undefined => {
 
-const getAllEventsFromAsyncDoc = (doc: AsyncAPIDocument, options: AsyncAPIPluginOptions): Event[] => {
-  const { externalAsyncAPIUrl } = options;
+  let messageName = message.name() || message.json('x-parser-message-name');
+  // If no name can be found from the message, and AsyncAPI defaults to "anonymous" value, try get the name from the payload itself
+  if (messageName?.includes('anonymous-')) {
+    messageName = message.payload()?.id() || messageName;
+  }
+  return messageName;
+};
+
+const getAllEventsFromAsyncDoc = (doc: AsyncAPIDocumentInterface, options: AsyncAPIPluginOptions): Event[] => {
+  const allMessages: any[] = [];
 
   const channels = doc.channels();
+  const service = doc.info().title();
 
-  const allMessages = Object.keys(channels).reduce((data: any, channelName) => {
-    const service = doc.info().title();
+  channels.forEach(function (channel) {
+    console.log('*** channel details:', channel.id(), channel.description());
 
-    const channel = channels[channelName];
-    const operation = channel.hasSubscribe() ? 'subscribe' : 'publish';
+    const operations = channel.operations();
 
-    const messages = channel[operation]().messages();
+    console.log('-------------------------------------operations-----------------------------------------')
+    operations.forEach((operation) => {
+      console.log(' ----- operationid:', operation.id(), 'isreceive:', operation.isReceive(), 'isSend:', operation.isSend());
+      operation.messages().forEach((message) => {
 
-    const eventsFromMessages = messages.map((message) => {
-      let messageName = message.name() || message.extension('x-parser-message-name');
+        let messageName = getMessageName(message);
+        console.log('----------- messageName', messageName, message.id(), message.contentType(), message.json('x-parser-message-name'));
+        console.log('----------- message');
+        // console.log(JSON.stringify(message));
+        console.log('----------- end  message');
 
-      // If no name can be found from the message, and AsyncAPI defaults to "anonymous" value, try get the name from the payload itself
-      if (messageName.includes('anonymous-')) {
-        messageName = message.payload().uid() || messageName;
-      }
+        const schema = message.payload()?.json();//message.originalPayload();
+        // const externalLink = {
+        //     label: `View event in AsyncAPI`,
+        //     url: `${externalAsyncAPIUrl}#message-${messageName}`,
+        //   };
 
-      const schema = message.originalPayload();
-      const externalLink = {
-        label: `View event in AsyncAPI`,
-        url: `${externalAsyncAPIUrl}#message-${messageName}`,
-      };
+        let eventFromMessage = {
+          name: messageName,
+          summary: message.summary(),
+          version: doc.info().version(),
+          producers: operation.isSend() ? [service] : [],//operation .isSend == subscribe in asyncapi ;operation === 'subscribe'
+          consumers: operation.isReceive() ? [service] : [],//operation .isReceive == publish in asyncapi ;  operation. === 'publish' 
+          // externalLinks: externalAsyncAPIUrl ? [externalLink] : [],
+          schema: schema ? JSON.stringify(schema, null, 4) : '',
+          badges: [],
+        };
+        allMessages.push(eventFromMessage);
 
-      return {
-        name: messageName,
-        summary: message.summary(),
-        version: doc.info().version(),
-        producers: operation === 'subscribe' ? [service] : [],
-        consumers: operation === 'publish' ? [service] : [],
-        externalLinks: externalAsyncAPIUrl ? [externalLink] : [],
-        schema: schema ? JSON.stringify(schema, null, 4) : '',
-        badges: [],
-      };
+      });
     });
-
-    return data.concat(eventsFromMessages);
-  }, []);
+  });
 
   // the same service can be the producer and consumer of events, check and merge any matchs.
   const uniqueMessages = allMessages.reduce((acc: any, message: any) => {
@@ -66,11 +82,11 @@ const getAllEventsFromAsyncDoc = (doc: AsyncAPIDocument, options: AsyncAPIPlugin
     }
     return acc;
   }, []);
-
   return uniqueMessages;
+
 };
 
-const parseAsyncAPIFile = async (pathToFile: string, options: AsyncAPIPluginOptions, copyFrontMatter: boolean) => {
+const parseAsyncAPIFile = async (pathToFile: string, options: AsyncAPIPluginOptions, copyFrontMatter?: boolean) => {
   const {
     versionEvents = true,
     renderMermaidDiagram = false,
@@ -88,67 +104,85 @@ const parseAsyncAPIFile = async (pathToFile: string, options: AsyncAPIPluginOpti
     throw new Error(`Failed to read file with provided path`);
   }
 
-  const doc = await parse(asyncAPIFile);
+  const { document, diagnostics } = await parser.parse(asyncAPIFile);
 
-  const service = getServiceFromAsyncDoc(doc);
-  const events = getAllEventsFromAsyncDoc(doc, options);
+  if (document) {
+    // console.log('stringify docu,ent',stringify(document));
+    const service = getServiceFromAsyncDoc(document);
+    const events = getAllEventsFromAsyncDoc(document, options);
+    if (!process.env.PROJECT_DIR) {
+      throw new Error('Please provide catalog url (env variable PROJECT_DIR)');
+    }
 
-  if (!process.env.PROJECT_DIR) {
-    throw new Error('Please provide catalog url (env variable PROJECT_DIR)');
-  }
+    if (domainName) {
+      const { writeDomainToCatalog } = utils({ catalogDirectory: process.env.PROJECT_DIR });
 
-  if (domainName) {
-    const { writeDomainToCatalog } = utils({ catalogDirectory: process.env.PROJECT_DIR });
+      const domain: Domain = {
+        name: domainName,
+        summary: domainSummary,
+      };
 
-    const domain: Domain = {
-      name: domainName,
-      summary: domainSummary,
+      await writeDomainToCatalog(domain, {
+        useMarkdownContentFromExistingDomain: true,
+        renderMermaidDiagram,
+        renderNodeGraph,
+      });
+    }
+
+    const { writeServiceToCatalog, writeEventToCatalog } = utils({
+      catalogDirectory: domainName ? path.join(process.env.PROJECT_DIR, 'domains', domainName) : process.env.PROJECT_DIR,
+    });
+
+    await writeServiceToCatalog(service, {
+      useMarkdownContentFromExistingService: true,
+      renderMermaidDiagram,
+      renderNodeGraph,
+      asyncApiFile: {
+        extension: 'yml',
+        fileContent: asyncAPIFile,
+      }
+    });
+
+    const eventFiles = events.map(async (event: any) => {
+      const { schema, ...eventData } = event;
+
+      await writeEventToCatalog(eventData, {
+        useMarkdownContentFromExistingEvent: true,
+        versionExistingEvent: versionEvents,
+        renderMermaidDiagram,
+        renderNodeGraph,
+        frontMatterToCopyToNewVersions: {
+          // only do consumers and producers if its not the first file.
+          consumers: copyFrontMatter,
+          producers: copyFrontMatter,
+        },
+        schema: {
+          extension: 'json',
+          fileContent: schema,
+        },
+      });
+    });
+
+    // write all events to folders
+    Promise.all(eventFiles);
+
+
+
+    // console.log('service:', service);
+    // console.log('events:', events);
+    return {
+      generatedEvents: events,
     };
-
-    await writeDomainToCatalog(domain, {
-      useMarkdownContentFromExistingDomain: true,
-      renderMermaidDiagram,
-      renderNodeGraph,
-    });
+  } else {
+    console.log('diagnostics', diagnostics);
+    return {
+      generatedEvents: [],
+    };
   }
 
-  const { writeServiceToCatalog, writeEventToCatalog } = utils({
-    catalogDirectory: domainName ? path.join(process.env.PROJECT_DIR, 'domains', domainName) : process.env.PROJECT_DIR,
-  });
+}
 
-  await writeServiceToCatalog(service, {
-    useMarkdownContentFromExistingService: true,
-    renderMermaidDiagram,
-    renderNodeGraph,
-  });
 
-  const eventFiles = events.map(async (event: any) => {
-    const { schema, ...eventData } = event;
-
-    await writeEventToCatalog(eventData, {
-      useMarkdownContentFromExistingEvent: true,
-      versionExistingEvent: versionEvents,
-      renderMermaidDiagram,
-      renderNodeGraph,
-      frontMatterToCopyToNewVersions: {
-        // only do consumers and producers if its not the first file.
-        consumers: copyFrontMatter,
-        producers: copyFrontMatter,
-      },
-      schema: {
-        extension: 'json',
-        fileContent: schema,
-      },
-    });
-  });
-
-  // write all events to folders
-  Promise.all(eventFiles);
-
-  return {
-    generatedEvents: events,
-  };
-};
 
 export default async (context: LoadContext, options: AsyncAPIPluginOptions) => {
   const { pathToSpec } = options;
@@ -166,6 +200,7 @@ export default async (context: LoadContext, options: AsyncAPIPluginOptions) => {
   const totalEvents = data.reduce((sum, { generatedEvents }) => sum + generatedEvents.length, 0);
 
   console.log(
-    chalk.green(`Successfully parsed ${listOfAsyncAPIFilesToParse.length} AsyncAPI file/s. Generated ${totalEvents} events`)
+    `Successfully parsed ${listOfAsyncAPIFilesToParse.length} AsyncAPI file/s. Generated ${totalEvents} events`
+    //  chalk.green(`Successfully parsed ${listOfAsyncAPIFilesToParse.length} AsyncAPI file/s. Generated ${totalEvents} events`)
   );
 };
