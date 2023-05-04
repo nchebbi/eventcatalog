@@ -25,7 +25,7 @@
     "canary:version": "echo 0.0.0-`git rev-list --count HEAD`+`git rev-parse --short HEAD`",
     "canary:bumpVersion": "yarn lerna version `yarn --silent canary:version` --exact --no-push --yes",
     "canary:publish": "yarn lerna publish from-package --dist-tag canary --yes --no-verify-access",
-    "postinstall": "yarn lock:update && yarn build:packages",
+   
     "lock:update": "npx --yes yarn-deduplicate",
     "start": "lerna run start --stream",
     "test": "cross-env PROJECT_DIR=/ jest",
